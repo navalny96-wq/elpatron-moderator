@@ -64,15 +64,17 @@ def run_bot():
     dp = updater.dispatcher
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, check_message))
 
+    # Очищаємо старі підключення вебхука
+    updater.bot.delete_webhook(drop_pending_updates=True)
+
     print("✅ Telegram-бот запущено (polling)…")
-    updater.start_polling(drop_pending_updates=True)
+    updater.start_polling()
     updater.idle()
 
 if __name__ == "__main__":
-    # Запускаємо бота у цьому ж процесі
+    # Стартуємо бота і Flask в одному процесі
     import threading
     threading.Thread(target=run_bot, daemon=True).start()
 
-    # Flask для Render
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
