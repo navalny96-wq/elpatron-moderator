@@ -4,7 +4,7 @@ from telegram import ChatPermissions
 import re
 from collections import defaultdict
 
-BOT_TOKEN = os.getenv("8313713885:AAGyf2vaxc6K4BGItB5iCn4Yora9L0r41e4")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 BAD_WORDS = [
     "хуй", "пизда", "єбать", "єбуч", "нахуй", "гандон", "залупа", "блядь", "сука", "шалава", "чмо", "мразь", "гнида",
