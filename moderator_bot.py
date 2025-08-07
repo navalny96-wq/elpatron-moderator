@@ -62,5 +62,26 @@ def main():
     updater.start_polling()
     updater.idle()
 
+def run_bot():
+    updater = Updater(BOT_TOKEN, use_context=True)
+    dp = updater.dispatcher
+    dp.add_handler(MessageHandler(Filters.text & (~Filters.command), moderate))
+    print("✅ Telegram-бот запущено (polling)…")
+    updater.start_polling()
+    updater.idle()
+
+# маленький веб-сервер для health-check Render
+app = Flask(__name__)
+
+@app.get("/")
+def ok():
+    return "OK", 200
+
 if __name__ == "__main__":
-    main()
+    # бот у окремому потоці
+    t = threading.Thread(target=run_bot, daemon=True)
+    t.start()
+    # HTTP-сервер слухає порт від Render
+    port = int(os.getenv("PORT", "10000"))
+    print(f"🌐 Health server on port {port}")
+    app.run(host="0.0.0.0", port=port)
