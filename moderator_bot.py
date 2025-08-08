@@ -144,6 +144,15 @@ def set_webhook():
         log.info(f"✅ Webhook set: {url}")
     else:
         raise RuntimeError("Не вдалося встановити webhook")
+    
+# --- Keepalive endpoint (щоб Render не засинав) ---
+KEEPALIVE_KEY = os.getenv("KEEPALIVE_KEY", "v3ryL0ngRand0mKey")  # додай змінну в Render → Environment
+
+@app.get(f"/keepalive/{KEEPALIVE_KEY}")
+def keepalive(v3ryL0ngRand0mKey):
+    # Можеш додати легенький лог, якщо хочеш
+    # print("🔥 keepalive ping")
+    return "ok", 200
 
 # ================== ВХІДНА ТОЧКА ==================
 if __name__ == "__main__":
