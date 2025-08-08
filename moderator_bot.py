@@ -6,18 +6,20 @@ from collections import defaultdict
 from flask import Flask, request, jsonify
 
 from telegram import Bot, Update
-from telegram.ext import Dispatcher, MessageHandler, Filters
+from telegram.ext import Dispatcher, MessageHandler, Filters, CommandHandler
 from telegram.error import TelegramError
 
-# ========= базові налаштування =========
+# ================== НАЛАШТУВАННЯ ==================
 BOT_TOKEN = os.getenv("BOT_TOKEN") or "ВСТАВ_СВІЙ_ТОКЕН_ТУТ"
 if BOT_TOKEN == "ВСТАВ_СВІЙ_ТОКЕН_ТУТ":
-    raise RuntimeError("Задай BOT_TOKEN у змінних середовища.")
+    raise RuntimeError("Задай змінну середовища BOT_TOKEN.")
 
-# URL сервісу (Render підставляє RENDER_EXTERNAL_URL автоматично)
+# Render автоматично підставляє RENDER_EXTERNAL_URL; можна явно задати APP_URL
 APP_URL = os.getenv("APP_URL") or os.getenv("RENDER_EXTERNAL_URL")
 if not APP_URL:
-    raise RuntimeError("Нема APP_URL/RENDER_EXTERNAL_URL. Додай APP_URL в Environment на Render.")
+    raise RuntimeError("Нема APP_URL/RENDER_EXTERNAL_URL. Додай APP_URL у Render → Environment.")
+
+MAX_WARNINGS = 2
 
 BAD_WORDS = [
     "хуй","пизда","єбать","єбуч","нахуй","гандон","залупа","блядь","сука","шалава","чмо","мразь","гнида",
@@ -26,59 +28,92 @@ BAD_WORDS = [
 BANNED_TOPICS = [
     "політика","путін","зеленський","війна","мобілізація","тероризм","насильство"
 ]
-URL_PATTERN = re.compile(r"(https?://|www\.)", re.IGNORECASE)
-MAX_WARNINGS = 2
 
+# URL у тексті (навіть без http)
+URL_RE = re.compile(r"(https?://|www\.)", re.IGNORECASE)
+
+# Пам’ять попереджень (in-memory)
 warnings = defaultdict(int)
 
+# ================== ЛОГУВАННЯ ==================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-log = logging.getLogger("modbot")
+log = logging.getLogger("moderator")
 
-# ========= Telegram обʼєкти =========
+# ================== TELEGRAM ==================
 bot = Bot(BOT_TOKEN)
 dispatcher = Dispatcher(bot=bot, update_queue=None, workers=4, use_context=True)
 
-# ========= логіка модерації =========
-def handle_violation(update, context, reason):
-    u = update.message.from_user
-    uid = u.id
-    chat_id = update.message.chat_id
+# ---- /ping для швидкої перевірки ----
+def ping(update, context):
+    try:
+        context.bot.send_message(update.effective_chat.id, "🏓 Pong!")
+    except TelegramError as e:
+        log.warning(f"/ping send error: {e}")
 
-    warnings[uid] += 1
+# ---- модерація ----
+def handle_violation(update, context, reason: str):
+    chat_id = update.effective_chat.id
+    user = update.message.from_user
+    uid = user.id
 
-    # видаляємо повідомлення
+    # 1) Видаляємо повідомлення
     try:
         update.message.delete()
     except TelegramError as e:
         log.warning(f"delete error: {e}")
 
-    if warnings[uid] < MAX_WARNINGS:
+    # 2) Рахуємо попередження
+    warnings[uid] += 1
+    count = warnings[uid]
+
+    # 3) Попередження або бан
+    if count < MAX_WARNINGS:
         try:
-            update.message.reply_text(f"⚠ Попередження! ({reason}). Наступного разу — бан.")
+            context.bot.send_message(chat_id, f"⚠ Попередження {user.first_name or ''}! ({reason}). Наступного разу — бан.")
         except TelegramError as e:
-            log.warning(f"warn reply error: {e}")
+            log.warning(f"warn send error: {e}")
     else:
         try:
-            context.bot.kick_chat_member(chat_id, uid)
-            update.message.reply_text(f"🚫 Користувача заблоковано ({reason}).")
+            context.bot.ban_chat_member(chat_id, uid)
+            context.bot.send_message(chat_id, f"🚫 Користувача {user.first_name or ''} заблоковано ({reason}).")
         except TelegramError as e:
             log.warning(f"ban error: {e}")
 
-def check_message(update, context):
-    if not update.message or not update.message.text:
+def text_filter(update, context):
+    msg = update.message
+    if not msg or not msg.text:
         return
-    text = update.message.text.lower()
 
+    text = msg.text.lower()
+    log.info(f"📩 {msg.from_user.id} @ {msg.chat_id}: {text}")
+
+    # нецензура
     if any(w in text for w in BAD_WORDS):
-        handle_violation(update, context, "нецензурна лексика"); return
+        handle_violation(update, context, "нецензурна лексика")
+        return
+
+    # заборонені теми
     if any(t in text for t in BANNED_TOPICS):
-        handle_violation(update, context, "заборонена тема"); return
-    if URL_PATTERN.search(text):
-        handle_violation(update, context, "посилання"); return
+        handle_violation(update, context, "заборонена тема")
+        return
 
-dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, check_message))
+    # URL у самому тексті
+    if URL_RE.search(text):
+        handle_violation(update, context, "посилання")
+        return
 
-# ========= Flask / Webhook =========
+    # URL як entities (Telegram сам розпізнав)
+    if msg.entities:
+        for ent in msg.entities:
+            if ent.type in ("url", "text_link"):
+                handle_violation(update, context, "посилання")
+                return
+
+# Реєструємо хендлери
+dispatcher.add_handler(CommandHandler("ping", ping))
+dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, text_filter))
+
+# ================== FLASK (webhook) ==================
 app = Flask(__name__)
 
 @app.get("/")
@@ -97,7 +132,7 @@ def webhook():
     return jsonify({"ok": True})
 
 def set_webhook():
-    # Перед установкою — чистимо підвішені апдейти
+    # знімаємо попередній webhook + чистимо чергу апдейтів
     try:
         bot.delete_webhook(drop_pending_updates=True)
     except Exception as e:
@@ -110,6 +145,7 @@ def set_webhook():
     else:
         raise RuntimeError("Не вдалося встановити webhook")
 
+# ================== ВХІДНА ТОЧКА ==================
 if __name__ == "__main__":
     set_webhook()
     port = int(os.getenv("PORT", "10000"))
