@@ -14,15 +14,24 @@ BOT_TOKEN = "8313713885:AAGvmRipYoCdu2BiVdli2WRNgUxtRDN_OWU"
 APP_URL   = "https://elpatron-moderator.onrender.com"  # твій домен Render
 KEEPALIVE_KEY = "v3ryL0ngRand0mKey"                    # ключ для пінгу
 
-# Попередження → перманентний мьют
+# Скільки попереджень до пермам’юта
 MAX_WARNINGS = 2
 
-# Нецензурна лексика / стоп-теми (можеш доповнювати)
+# ===== Нецензурна/образлива лексика, лайтові образи (укр/рус/eng) =====
 BAD_WORDS = [
-    "хуй","пизда","ебать","ёбать","ебуч","ёбуч","нахуй","гондон","залупа","блядь","сука",
-    "шалава","чмо","мразь","гнида",
-    "fuck","shit","bitch","asshole","dick","pussy","nigger","retard"
+    # RU/UA hard
+    "хуй","пизда","ебать","ёбать","єбать","єбуч","ебуч","ёбуч","нахуй","гондон","залупа","блядь","сука",
+    "шалава","чмо","мразь","гнида","ублюдок","падла","сучара","петух","хер",
+    # RU/UA mild insults / slang
+    "какашка","черкаш","дебіл","дебил","дурак","ідіот","идиот","кретин","тупой","тупица","ніщеброд","нищеброд",
+    "мудак","урод","тварь","скотина","козел","козёл","баран","нищебрик","задрот","говнюк","сраний","срака","жопа",
+    "пиписька","піся","сиска","дерьмо","говно","шлак","лох","придурок","придурок","обморок","випердок","випердок",
+    # EN
+    "fuck","shit","bitch","asshole","dick","pussy","jerk","idiot","stupid","moron","loser",
+    "dumbass","scumbag","weirdo","bastard","retard","nigger", # (образливі — щоб фільтрувати)
 ]
+
+# Заборонені теми (залишив як було, за потреби розшириш)
 BANNED_TOPICS = [
     "политика","путин","зеленский","война","мобилизация","терроризм","насилие"
 ]
@@ -54,11 +63,22 @@ def is_privileged(chat_id: int, user_id: int) -> bool:
         log.warning(f"is_privileged error: {e}")
         return False
 
+def is_from_sender_chat(msg) -> bool:
+    """
+    Повідомлення від імені чату/каналу/анонімного адміна.
+    У такому випадку НЕ модерувати взагалі.
+    """
+    try:
+        return bool(getattr(msg, "sender_chat", None))
+    except Exception:
+        return False
+
 def require_admin(func):
     """Команда тільки для адмінів/власника."""
     def wrapper(update, context):
         chat_id = update.effective_chat.id
         user_id = update.effective_user.id
+        # дозволяємо з приватного теж, але перевіряємо, що юзер — адмін у цій групі
         if not is_privileged(chat_id, user_id):
             return
         return func(update, context)
@@ -116,7 +136,7 @@ def cmd_unban(update, context):
     target_id = None
 
     # /unban у відповіді на повідомлення
-    if update.message.reply_to_message:
+    if update.message and update.message.reply_to_message:
         target_id = update.message.reply_to_message.from_user.id
 
     # або /unban <user_id>
@@ -142,25 +162,34 @@ def cmd_unban(update, context):
 
 # ---- модерація ----
 def handle_violation(update, context, reason: str):
-    chat_id = update.effective_chat.id
-    user = update.message.from_user
+    msg = update.message
+    if not msg:
+        return
+    chat_id = msg.chat_id
+
+    # 0) Якщо від імені чату/каналу — не чіпаємо взагалі
+    if is_from_sender_chat(msg):
+        return
+
+    user = msg.from_user
+    if not user:
+        return
     uid = user.id
 
-    # Імунітет для адмінів/власника/бота
+    # 1) Імунітет для адмінів/власника/бота
     if is_privileged(chat_id, uid):
         return
 
-    # 1) Видалити повідомлення
+    # 2) Видалити повідомлення
     try:
-        update.message.delete()
+        msg.delete()
     except TelegramError as e:
         log.warning(f"delete error: {e}")
 
-    # 2) Попередження
+    # 3) Попередження/мьют
     warnings[(chat_id, uid)] += 1
     count = warnings[(chat_id, uid)]
 
-    # 3) Попередження або пермамьют
     if count < MAX_WARNINGS:
         try:
             context.bot.send_message(
@@ -185,32 +214,36 @@ def text_filter(update, context):
     if not msg or not msg.text:
         return
 
-    text = msg.text.lower()
+    text = msg.text.lower().strip()
     chat_id = msg.chat_id
-    user_id = msg.from_user.id
+    user_id = msg.from_user.id if msg.from_user else None
 
     log.info(f"📩 {user_id} @ {chat_id}: {text}")
 
-    # пропускаємо адмінів/власника/бота
-    if is_privileged(chat_id, user_id):
+    # 0) Якщо від імені чату/каналу — не модерувати взагалі
+    if is_from_sender_chat(msg):
         return
 
-    # нецензурщина
+    # 1) Пропускаємо адмінів/власника/бота
+    if user_id and is_privileged(chat_id, user_id):
+        return
+
+    # 2) Нецензурщина / образи
     if any(w in text for w in BAD_WORDS):
-        handle_violation(update, context, "нецензурная лексика")
+        handle_violation(update, context, "нецензурная/оскорбительная лексика")
         return
 
-    # заборонені теми
+    # 3) Заборонені теми
     if any(t in text for t in BANNED_TOPICS):
         handle_violation(update, context, "запрещённая тема")
         return
 
-    # посилання в тексті
+    # 4) Посилання в тексті
     if URL_RE.search(text):
         handle_violation(update, context, "ссылки запрещены")
         return
 
-    # посилання-entities
+    # 5) Посилання як entities
     if msg.entities:
         for ent in msg.entities:
             if ent.type in ("url", "text_link"):
@@ -242,7 +275,7 @@ def webhook():
         update = Update.de_json(data, bot)
         dispatcher.process_update(update)
     except Exception as e:
-        log.exception(f"update handling error: {e}")
+        logging.exception(f"update handling error: {e}")
         return jsonify({"ok": False}), 500
     return jsonify({"ok": True})
 
@@ -251,12 +284,12 @@ def set_webhook():
     try:
         bot.delete_webhook(drop_pending_updates=True)
     except Exception as e:
-        log.warning(f"delete_webhook warn: {e}")
+        logging.warning(f"delete_webhook warn: {e}")
 
     url = f"{APP_URL.rstrip('/')}/{BOT_TOKEN}"
     ok = bot.set_webhook(url=url, drop_pending_updates=True, max_connections=40)
     if ok:
-        log.info(f"✅ Webhook set: {url}")
+        logging.info(f"✅ Webhook set: {url}")
     else:
         raise RuntimeError("Не удалось установить webhook")
 
@@ -264,5 +297,5 @@ def set_webhook():
 if __name__ == "__main__":
     set_webhook()
     port = int(os.getenv("PORT", "10000"))
-    log.info(f"🌐 Flask listening on {port}")
+    logging.info(f"🌐 Flask listening on {port}")
     app.run(host="0.0.0.0", port=port)
